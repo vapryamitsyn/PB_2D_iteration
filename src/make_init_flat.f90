@@ -1,0 +1,25 @@
+    MODULE INIT_DENS
+    USE BOX2D
+    IMPLICIT NONE
+    PUBLIC::MAKE_INIT
+    CONTAINS
+    SUBROUTINE MAKE_INIT(RHO,R)
+    REAL, INTENT(OUT):: RHO(0:NX-1,0:NY-1,0:1)
+    REAL, INTENT(IN):: R
+    INTEGER :: I,J
+    REAL :: RHA,RHB
+    !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I,J,RHA,RHB)
+    DO I = 0,NX-1
+        IF(I<NX/2) THEN
+            RHA=0.;RHB=1.
+        ELSE
+            RHA=1.;RHB=0.
+        END IF
+        DO J=0,NY-1
+            RHO(I,J,0)=RHA
+            RHO(I,J,1)=RHB
+        END DO
+    END DO
+    !$OMP END PARALLEL DO
+    END SUBROUTINE MAKE_INIT
+    END MODULE INIT_DENS

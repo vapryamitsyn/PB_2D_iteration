@@ -1,0 +1,289 @@
+    MODULE PBSOLVER
+    USE BOX
+    USE MYFFT
+    USE VECTORS3D
+    USE INOUT
+    USE PARTICLES
+    USE DIFFUSION
+    USE PARTITION
+    IMPLICIT NONE
+    !REAL,PUBLIC    ::  IQ2(NT2)
+    REAL,PUBLIC    ::  IxQ2(NT2,3)
+    REAL(8),PUBLIC :: PSI(NT),PSIX(NT),E2(NT)
+    REAL(8),PUBLIC :: RHOIPLUS(NT),RHOIMINUS(NT),RHOQ(NT)
+    REAL(8),PUBLIC :: ALPHAP(NT),ALPHAC(NT),BETAC(NT) !,BETAP(NT)
+    REAL(8),PUBLIC :: EPS_I(NT)
+    REAL(8),PUBLIC :: D(NT,3)
+    REAL(8),PUBLIC :: EPS_WI,EPS_CP,EPS_CC
+    REAL(8),PUBLIC :: PKA_P,PKA_C,PKB_C,APN,BPN,zpa,zca,zcb
+
+
+    REAL(8),PUBLIC :: ZX
+
+    REAL(8),PUBLIC :: NORMPLUS,NORMIMINUS
+
+    REAL(8),PUBLIC ::LAMBDA_PSI,DELTA_PSI,LBX,MINDEX  ! MINDEX=(1/(1+m2))
+
+    CONTAINS
+
+
+    SUBROUTINE ITERATE_PB(n_it,DQ,DELTAPHI_MAX,ESE)
+    INTEGER::I,n_it,J
+    intent(in) ::n_it
+    real(8),intent(out) ::dq,DELTAPHI_MAX,ESE
+    optional:: DELTAPHI_MAX,ESE
+    REAL(8) :: EXPSI,RH,QMIN,QPL,QPX,PSX
+    REAL(8) :: FV,ERR,EPI !,PSX
+    DO J=1, N_IT
+        QPL=0.; QMIN=0.;DQ=0.; QPX=0.
+        !$OMP PARALLEL DEFAULT (SHARED)  private(i,fv,EXPSI,RH)
+        !$OMP DO REDUCTION(+:QMIN,QPL)  
+        DO I=1,NT
+            EXPSI=DEXP(REAL(PSI(I),8))
+            FV=IPHIP(I)
+            RH=FV*EXPSI
+            QMIN=QMIN+RH
+            RHOIMINUS(I)=RH        
+            RH=FV/EXPSI        
+            QPL=QPL+RH
+            RHOIPLUS(I)=RH
+            ALPHAP(I)=EXPSI/(EXPSI+ZPA*ZX)
+            ALPHAC(I)=EXPSI/(EXPSI+ZCA*ZX)
+            BETAC(I)=ZX/(EXPSI*ZCB+ZX)
+        END DO
+        !$OMP END DO
+
+        !$OMP DO    REDUCTION(+:Qpx)  
+        DO I=1,NT
+            QPX=QPX+M2*ALPHAP(I)*RHO(I)
+        END DO
+        !$OMP END DO
+
+        !$OMP MASTER
+        QPLUS=QPL*NTI
+        QMINUS=QMIN*NTI
+
+
+        MPOLY=ZPOLY*QZ*ZX**QPX
+        MIMINUS=ZMINUS*QMINUS*ZX
+        !MIPLUS=MIMINUS-PQN+M2*MPOLY
+        MIPLUS=ZPLUS*QPLUS/ZX
+
+        NORMIMINUS=LVI*MIMINUS/QMINUS    
+        NORMPLUS=LVI*MIPLUS/QPLUS
+        !$OMP END MASTER
+        !OMP BARRIER
+
+
+        !$OMP DO    REDUCTION(+:DQ)  
+        DO I=1,NT
+            RHOQ(I)=NORMPLUS*RHOIPLUS(I)-NORMIMINUS*RHOIMINUS(I)-QPX*MPOLY*RHO(I)+bpn*BETAC(I)*QP(I)-apn*ALPHAC(I)*QP(I)
+            dq=dq+RHOQ(I)
+        END DO
+        !$OMP END DO
+        !$OMP END PARALLEL
+        ZX=DEXP(LAMBDA_PSI*LOG(ZX)+DELTA_PSI*DQ)
+    END DO
+
+    !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I) 
+    DO I=1,NT                
+        EPS_I(I)=EPSCI(QP(I),MPOLY,RHO(I))
+    ENDDO
+    !$OMP END PARALLEL DO
+
+    ! INVERSE LAPLACIAN
+
+    !CALL CONVOLUTE(EXPW,IQ2,PSIX)
+    call gCONVOLUTE(RHOQ,IxQ2,D)
+    !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I,epi) 
+    DO I=1,NT
+        EPI=EPS_I(I)
+        D(I,1)=EPI*D(I,1)
+        D(I,2)=EPI*D(I,2)
+        D(I,3)=EPI*D(I,3)
+    ENDDO
+    !$OMP END PARALLEL DO
+    call dCONVOLUTE(D,IxQ2,PSIX)
+    ! END INVERSE LAPLACIAN
+    
+    IF (PRESENT(DELTAPHI_MAX)) THEN        !
+    DELTAPHI_MAX=0.
+    ESE=0.   
+    !$OMP PARALLEL  DEFAULT(SHARED) PRIVATE(I,PSX)
+    !$OMP  DO  REDUCTION(MAX:DELTAPHI_MAX) 
+    DO I=1,NT
+        PSX=PSIX(I)
+        DELTAPHI_MAX=MAX(DELTAPHI_MAX,ABS(PSI(I)-PSX))
+        PSI(I)=LAMBDA_PSI*PSI(I)+DELTA_PSI*PSX
+    ENDDO
+    !$OMP END  DO
+    !$OMP  DO  REDUCTION(+:ESE)
+    DO I=1,NT
+        ESE=ESE+PSIX(I)*EXPW(I)
+    ENDDO
+    !$OMP END DO
+    !$OMP END PARALLEL 
+    ESE=0.5*LVN*ESE
+    RETURN        
+    ELSE
+          !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I) 
+    DO I=1,NT
+        PSI(I)=LAMBDA_PSI*PSI(I)+DELTA_PSI*PSIX(I)
+    ENDDO
+    !$OMP END PARALLEL DO
+    ENDIF
+    RETURN
+    END SUBROUTINE ITERATE_PB
+
+
+
+
+
+    SUBROUTINE SET_EPS(EPS_I) 
+    REAL::EPS_I(NT)
+    END SUBROUTINE SET_EPS
+
+    SUBROUTINE MAKE_IQ2(Q2I,LAMBDA) !cubic cell only 
+    REAL,INTENT(INOUT) :: Q2I(0:NX/2,0:NY-1,0:NZ-1)
+    REAL(8),INTENT(IN):: LAMBDA
+    REAL(8) :: L2
+    INTEGER :: IX,JY,KZ
+    L2=0.25*LAMBDA*LX*LX/PI2
+    !$OMP PARALLEL DO DEFAULT(shared) private(ix,jy,kz)
+    DO KZ=0,NZ-1
+        DO JY=0,NY-1
+            DO IX=0,NX/2
+                Q2I(IX,JY,KZ)=L2/AMAX0(1,RD2(KZ,NZ)+RD2(JY,NY)+IX**2)
+            ENDDO
+        ENDDO
+    ENDDO 
+    !$OMP END PARALLEL DO
+    Q2I(0,0,0)=0.
+    END SUBROUTINE MAKE_IQ2
+
+
+    SUBROUTINE MAKE_XYZQ2(XQ2)
+    REAL,INTENT(INOUT) :: XQ2(0:NX/2,0:NY-1,0:NZ-1,3)
+    REAL(8) :: Q2,L1X,L1Y,L1Z
+    INTEGER :: IX,JY,KZ,X2,Y2,Z2,VX,VY,VZ
+    L1X=2*PI/LX
+    L1Y=2*PI/LY
+    L1Z=2*PI/LZ
+    !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(IX,JY,KZ,X2,Y2,Z2,VY,VZ,Q2)
+    DO KZ=0,NZ-1
+        VZ=L1z*zgrad(kz,nz/2)
+        Z2=(L1z*MIN(KZ,NZ-KZ))**2
+        DO JY=0,NY-1
+            VY=L1Y*zgrad(jy,ny/2)
+            Y2=(L1Y*MIN(JY,NY-JY))**2
+            DO IX=0,NX/2
+                vx=l1x*zgrad(ix,nx/2)
+                Q2=(l1x*IX)**2+Y2+Z2
+                IF(Q2>0.)THEN
+                    Q2=1./Q2
+                    XQ2(IX,JY,KZ,1)=Q2*VX
+                    xQ2(IX,JY,KZ,2)=Q2*VY
+                    xQ2(IX,JY,KZ,3)=Q2*VZ
+                ELSE
+                    XQ2(IX,JY,KZ,1)=0.
+                    xQ2(IX,JY,KZ,2)=0.
+                    xQ2(IX,JY,KZ,3)=0.
+                END IF
+
+            ENDDO
+        ENDDO
+    ENDDO 
+    !$OMP END PARALLEL DO
+    CONTAINS 
+    INTEGER ELEMENTAL FUNCTION ZGRAD(I,NH)
+    INTEGER,INTENT(IN)::I,NH
+    IF(I<NH) THEN
+        ZGRAD=I
+    ELSEIF(I==NH) THEN
+        ZGRAD=0
+    ELSE
+        ZGRAD =I-2*NH
+    END IF
+    RETURN
+    END FUNCTION ZGRAD
+    END SUBROUTINE MAKE_XYZQ2
+
+    ELEMENTAL REAL(8) FUNCTION EPSCI(RHO_P,MP,RHO_C)
+    REAL(8),INTENT(IN) ::MP,RHO_P,RHO_C 
+    EPSCI=EPS_WI+MP*EPS_CP*RHO_P+EPS_CC*RHO_C    
+    END FUNCTION EPSCI 
+
+
+
+    END MODULE PBSOLVER
+        !SUBROUTINE ITERATE_PBX(DELTAPHI_MAX,ESE,QTEST)
+    !REAL(8),INTENT(OUT) ::DELTAPHI_MAX,ESE,QTEST
+    !INTEGER::I
+    !REAL(8) :: EXPSI,RH,QMIN,QPL
+    !REAL(8) :: FV,err,PSX
+    !
+    !QPL=0.; QMIN=0.
+    !!$OMP PARALLEL DEFAULT (SHARED)  private(i,fv,EXPSI,RH)
+    !
+    !!$OMP DO REDUCTION(+:QMIN,QPL)  
+    !DO I=1,NT
+    !    EXPSI=DEXP(REAL(PSI(I),8))
+    !    FV=IPHIP(I)
+    !    RH=FV*EXPSI
+    !    QMIN=QMIN+RH
+    !    RHOIMINUS(I)=RH        
+    !    RH=FV/EXPSI        
+    !    QPL=QPL+RH
+    !    rhoiplus(I)=RH
+    !END DO
+    !!$OMP END DO
+    !
+    !!$OMP MASTER
+    !QPLUS=QPL*NTI
+    !QMINUS=QMIN*NTI
+    !
+    !
+    !MPOLY=ZPOLY*QZ*ZX**M2
+    !MIMINUS=ZMINUS*QMINUS*ZX
+    !!MIPLUS=MIMINUS-PQN+M2*MPOLY
+    !MIPLUS=ZPLUS*QPLUS/ZX
+    !
+    !NORMIMINUS=LVI*MIMINUS/QMINUS    
+    !NORMPLUS=LVI*MIPLUS/QPLUS
+    !!$OMP END MASTER
+    !!OMP BARRIER
+    !
+    !!$OMP DO   
+    !DO I=1,NT
+    !    EXPW(I)=NORMPLUS*RHOIPLUS(I)-NORMIMINUS*RHOIMINUS(I)-M2*MPOLY*RHO(I)+Q_PARTICLE*QP(I)
+    !END DO
+    !!$OMP END DO
+    !!$OMP END PARALLEL
+    !
+    !! INVERSE LAPLACIAN
+    !!CALL CONVOLUTE(EXPW,IQ2,PSIX)
+    !
+    !! END INVERSE LAPLACIAN
+    !
+    !DELTAPHI_MAX=0.
+    !ESE=0.   ; QTEST=0.
+    !!$OMP PARALLEL  DEFAULT(SHARED) PRIVATE(I,PSX)
+    !!$OMP  DO  REDUCTION(MAX:DELTAPHI_MAX) 
+    !DO I=1,NT
+    !    PSX=PSIX(I)
+    !    DELTAPHI_MAX=MAX(DELTAPHI_MAX,ABS(PSI(I)-PSX))
+    !    PSI(I)=LAMBDA_PSI*PSI(I)+DELTA_PSI*PSX
+    !ENDDO
+    !!$OMP END  DO
+    !!$OMP  DO  REDUCTION(+:ESE,QTEST)
+    !DO I=1,NT
+    !    ESE=ESE+PSIX(I)*EXPW(I)
+    !    QTEST=QTEST+EXPW(I)
+    !ENDDO
+    !!$OMP END DO
+    !!$OMP END PARALLEL 
+    !ESE=0.5*LVN*ESE
+    !QTEST=QTEST*LVN
+    !
+    !RETURN
+    !END SUBROUTINE ITERATE_PBX
